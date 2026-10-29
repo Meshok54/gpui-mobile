@@ -54,6 +54,14 @@ pub(crate) struct FramePacer {
     last_frame_at: Cell<Option<Instant>>,
 }
 
+/// Shortest spacing between frames the host allows, nanoseconds (0 — no cap).
+/// Set by `host::set_max_fps`; a due frame inside the spacing waits, it is not lost.
+pub(crate) static MIN_FRAME_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn min_spacing() -> Duration {
+    Duration::from_nanos(MIN_FRAME_NS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 impl FramePacer {
     /// A pacer driven by a vsync source: `post_vsync` posts one callback that
     /// must end in [`on_vsync`](Self::on_vsync). `interval` is the display's
@@ -118,6 +126,9 @@ impl FramePacer {
     /// Takes the due frame, if any. The loop draws when this returns `true`
     /// and only then; a frame left untaken (window inactive) stays due.
     pub(crate) fn take_frame(&self, now: Instant) -> bool {
+        if self.due.get() && self.last_frame_at.get().is_some_and(|last| now.duration_since(last) < min_spacing()) {
+            return false; // frame-rate cap: stays due, poll_timeout wakes the loop when the spacing is over
+        }
         if self.due.replace(false) {
             self.last_frame_at.set(Some(now));
             return true;
@@ -155,7 +166,8 @@ impl FramePacer {
     /// an unrelated wakeup can bring work.
     pub(crate) fn poll_timeout(&self, now: Instant) -> Option<Duration> {
         if self.due.get() {
-            return Some(Duration::ZERO);
+            let wait = self.last_frame_at.get().map_or(Duration::ZERO, |last| (last + min_spacing()).saturating_duration_since(now));
+            return Some(wait);
         }
         self.fallback_due_at
             .get()

@@ -340,6 +340,13 @@ fn on_surface_created(
     }
 }
 
+/// Cap GPUI's frame rate (0 — no cap, one frame per vsync). Animations stay on time: GPUI advances them by
+/// elapsed time, so skipped vsyncs only lower the frame rate.
+pub fn set_max_fps(fps: u32) {
+    let ns = if fps == 0 { 0 } else { 1_000_000_000 / fps as u64 };
+    crate::frame_pacer::MIN_FRAME_NS.store(ns, Ordering::Relaxed);
+}
+
 /// Hand a `Surface` to the render thread. Call from both `surfaceCreated` and
 /// `surfaceChanged`; a repeat of the surface already held is treated as a resize.
 pub fn surface_created(window: NativeWindow, scale: f32) {

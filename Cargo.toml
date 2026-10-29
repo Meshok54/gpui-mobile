@@ -50,7 +50,7 @@ microphone = []
 media_session = []
 
 [lib]
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"] # у нас — только библиотека для gpuichat (было staticlib, cdylib, rlib)
 
 # ── shared deps (all platforms) ──────────────────────────────────────────────
 
