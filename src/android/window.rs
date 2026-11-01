@@ -243,7 +243,15 @@ impl SafeAreaInsets {
     }
 }
 
+/// Кадр окна без `NativeWindow` ([`AndroidWindow::new_offscreen`]): хост рисует сцену рендером сам — в свою
+/// текстуру (`WgpuRenderer::draw_to`) и отдаёт её дальше. `dyn`: тип замыкания хоста здесь неизвестен, вызов —
+/// раз на нарисованный кадр.
+pub type OffscreenDraw = Box<dyn FnMut(&mut WgpuRenderer, &gpui::Scene) + Send>;
+
 struct WindowState {
+    /// Рисование окна без `NativeWindow` (см. [`OffscreenDraw`]); `None` — обычное окно.
+    offscreen_draw: Option<OffscreenDraw>,
+
     /// The `NativeWindow` handle.  Reference-counted via `ndk::NativeWindow`
     /// (Clone acquires, Drop releases).  `None` while the surface is
     /// unavailable (between `term_window` and the next `init_window`).
@@ -384,6 +392,7 @@ impl AndroidWindow {
         let surface_window_addr = native_window.ptr().as_ptr() as usize;
 
         let state = Arc::new(Mutex::new(WindowState {
+            offscreen_draw: None,
             native_window: Some(native_window),
             gpu_context,
             renderer: Some(renderer),
@@ -413,11 +422,59 @@ impl AndroidWindow {
         }))
     }
 
+    /// Окно без `NativeWindow`: рендер без поверхности (`WgpuRenderer::new_offscreen`) на уже готовом
+    /// `gpu_context`, кадр рисует `draw` хоста. Окно сразу активно; поверхность не теряется.
+    pub fn new_offscreen(
+        gpu_context: GpuContext,
+        width: i32,
+        height: i32,
+        scale_factor: f32,
+        draw: OffscreenDraw,
+    ) -> Result<Arc<Self>> {
+        log::info!("AndroidWindow::new_offscreen — {}×{} scale={:.1}", width, height, scale_factor);
+        let config = WgpuSurfaceConfig {
+            size: gpui::size(gpui::DevicePixels(width), gpui::DevicePixels(height)),
+            transparent: true,
+            preferred_present_mode: None,
+        };
+        let renderer = WgpuRenderer::new_offscreen(Rc::clone(&gpu_context), config)
+            .context("failed to create offscreen gpui_wgpu renderer")?;
+        let state = Arc::new(Mutex::new(WindowState {
+            offscreen_draw: Some(draw),
+            native_window: None,
+            gpu_context,
+            renderer: Some(renderer),
+            width,
+            height,
+            scale_factor,
+            safe_area_insets: SafeAreaInsets::default(),
+            appearance: WindowAppearance::Light,
+            is_active: true,
+            transparent: true,
+            surface_window_addr: 0,
+            request_frame_callback: None,
+            touch_callback: None,
+            key_callback: None,
+            resize_callback: None,
+            close_callback: None,
+            appearance_callback: None,
+            active_status_callback: None,
+            visibility_callback: None,
+        }));
+        Ok(Arc::new(Self {
+            state,
+            id: ((width as u64) << 32) | (height as u64) | (1 << 63),
+            active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            force_render_once: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }))
+    }
+
     /// Create a headless `AndroidWindow` for testing.
     ///
     /// No wgpu surface is created.
     pub fn headless(width: i32, height: i32, scale_factor: f32) -> Arc<Self> {
         let state = Arc::new(Mutex::new(WindowState {
+            offscreen_draw: None,
             native_window: None,
             gpu_context: Rc::new(RefCell::new(None)),
             renderer: None,
@@ -743,19 +800,27 @@ impl AndroidWindow {
         // during that time prevents all other state accessors (bounds,
         // scale_factor, etc.) from running, leading to deadlock when
         // GPUI's layout or the event loop needs state during a render.
-        let mut renderer = {
+        let (mut renderer, mut offscreen) = {
             let mut state = self.state.lock();
             match state.renderer.take() {
-                Some(r) => r,
+                Some(r) => (r, state.offscreen_draw.take()),
                 None => return,
             }
         };
 
-        renderer.draw(scene);
+        match offscreen.as_mut() {
+            Some(draw) => draw(&mut renderer, scene),
+            None => {
+                renderer.draw(scene);
+            }
+        }
 
         // Put the renderer back.
         let mut state = self.state.lock();
         state.renderer = Some(renderer);
+        if offscreen.is_some() {
+            state.offscreen_draw = offscreen;
+        }
     }
 
     /// Invoke the `request_frame_callback` if one is registered.

@@ -90,9 +90,20 @@ struct LooperPtr(*mut ndk_sys::ALooper);
 // SAFETY: `ALooper_wake` is documented as safe to call from any thread.
 unsafe impl Send for LooperPtr {}
 
+/// Создание окна без `NativeWindow` на потоке рендера: GPU-контекст хоста (его GL-контекст делается текущим
+/// здесь же) и рисование кадра. `dyn`: замыкание хоста, вызывается один раз.
+pub type OffscreenInit =
+    Box<dyn FnOnce() -> anyhow::Result<(gpui_wgpu::WgpuContext, super::window::OffscreenDraw)> + Send>;
+
 enum Command {
     SurfaceCreated {
         window: NativeWindow,
+        scale: f32,
+    },
+    OffscreenCreated {
+        init: OffscreenInit,
+        width: i32,
+        height: i32,
         scale: f32,
     },
     SurfaceDestroyed,
@@ -219,6 +230,9 @@ fn render_thread(launch: Launch) {
                 Command::SurfaceCreated { window, scale } => {
                     on_surface_created(&platform, window, scale, &mut app);
                 }
+                Command::OffscreenCreated { init, width, height, scale } => {
+                    on_offscreen_created(&platform, init, width, height, scale, &mut app);
+                }
                 Command::SurfaceDestroyed => {
                     if let Some(win) = platform.primary_window() {
                         // Keeps the renderer (and its atlas) alive; only the surface goes.
@@ -324,19 +338,53 @@ fn on_surface_created(
             CURRENT_SURFACE.store(incoming, Ordering::SeqCst);
             win.set_active(true);
             log::info!("gpui-main: first window opened");
-            if let Some(launch) = app.launch.take() {
-                // Without an `AndroidApp` to drive, `AndroidPlatform::run` invokes the
-                // callback immediately and returns — the shape `run_embedded` expects.
-                // The handle is what keeps the `App` alive afterwards.
-                let mut application =
-                    Application::with_platform(SharedPlatform::new(Arc::clone(platform)).into_rc());
-                if let Some(configure) = CONFIGURE.lock().expect("poisoned").take() {
-                    application = configure(application);
-                }
-                app.handle = Some(application.run_embedded(launch));
-            }
+            launch_app(platform, app);
         }
         Err(err) => log::error!("gpui-main: open_window failed: {err:#}"),
+    }
+}
+
+/// Построить `App` хоста (один раз, после первого окна).
+fn launch_app(platform: &Arc<AndroidPlatform>, app: &mut HostApp) {
+    if let Some(launch) = app.launch.take() {
+        // Without an `AndroidApp` to drive, `AndroidPlatform::run` invokes the
+        // callback immediately and returns — the shape `run_embedded` expects.
+        // The handle is what keeps the `App` alive afterwards.
+        let mut application =
+            Application::with_platform(SharedPlatform::new(Arc::clone(platform)).into_rc());
+        if let Some(configure) = CONFIGURE.lock().expect("poisoned").take() {
+            application = configure(application);
+        }
+        app.handle = Some(application.run_embedded(launch));
+    }
+}
+
+fn on_offscreen_created(
+    platform: &Arc<AndroidPlatform>,
+    init: OffscreenInit,
+    width: i32,
+    height: i32,
+    scale: f32,
+    app: &mut HostApp,
+) {
+    if platform.primary_window().is_some() {
+        log::error!("gpui-main: окно без поверхности — окно уже есть, второе не создаю");
+        return;
+    }
+    let (context, draw) = match init() {
+        Ok(v) => v,
+        Err(err) => {
+            log::error!("gpui-main: GPU-контекст хоста не создан: {err:#}");
+            return;
+        }
+    };
+    match platform.open_offscreen_window(context, width, height, scale, draw) {
+        Ok(win) => {
+            win.set_active(true);
+            log::info!("gpui-main: first window opened (offscreen)");
+            launch_app(platform, app);
+        }
+        Err(err) => log::error!("gpui-main: open_offscreen_window failed: {err:#}"),
     }
 }
 
@@ -352,6 +400,13 @@ pub fn set_max_fps(fps: u32) {
 pub fn surface_created(window: NativeWindow, scale: f32) {
     SCALE_BITS.store(scale.to_bits(), Ordering::Relaxed);
     post(Command::SurfaceCreated { window, scale });
+}
+
+/// Окно без `NativeWindow`: `init` выполнится на потоке рендера (создать там GPU-контекст и рисование кадра),
+/// окно `width`×`height` физических пикселей. Вместо [`surface_created`]; звать один раз.
+pub fn offscreen_created(init: OffscreenInit, width: i32, height: i32, scale: f32) {
+    SCALE_BITS.store(scale.to_bits(), Ordering::Relaxed);
+    post(Command::OffscreenCreated { init, width, height, scale });
 }
 
 /// Take the surface back and **block until the render thread has let go of it**.

@@ -595,6 +595,24 @@ impl AndroidPlatform {
         Ok(window)
     }
 
+    /// Окно без `NativeWindow` (см. `AndroidWindow::new_offscreen`): GPU-контекст `context` хост создал сам
+    /// (обычно `WgpuContext::new_external_gl` на своём GL-контексте), он становится общим контекстом платформы.
+    pub fn open_offscreen_window(
+        &self,
+        context: gpui_wgpu::WgpuContext,
+        width: i32,
+        height: i32,
+        scale_factor: f32,
+        draw: super::window::OffscreenDraw,
+    ) -> Result<Arc<AndroidWindow>> {
+        let mut state = self.state.lock();
+        *state.gpu_context.borrow_mut() = Some(context);
+        let window = AndroidWindow::new_offscreen(Rc::clone(&state.gpu_context), width, height, scale_factor, draw)?;
+        state.windows.push(Arc::clone(&window));
+        log::info!("AndroidPlatform::open_offscreen_window — id={:#x}", window.id());
+        Ok(window)
+    }
+
     /// Remove and return the window identified by `id`.
     pub fn close_window(&self, id: u64) -> Option<Arc<AndroidWindow>> {
         self.state.lock().windows.remove(id)
