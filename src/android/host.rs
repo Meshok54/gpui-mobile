@@ -137,6 +137,21 @@ type Launch = Box<dyn FnOnce(&mut App) + Send>;
 /// that must exist before the first frame — an asset source, most importantly.
 type Configure = Box<dyn FnOnce(Application) -> Application + Send>;
 
+/// Хук хоста на потоке рендера: вызывается на каждом проходе цикла (после команд и до кадра GPUI).
+/// `dyn`: замыкание хоста, тип здесь неизвестен.
+type TickHook = Box<dyn FnMut() + Send>;
+static TICK: Mutex<Option<TickHook>> = Mutex::new(None);
+
+/// Поставить хук потока рендера (см. [`TickHook`]); будить цикл ради него — [`wake`].
+pub fn set_tick_hook(hook: TickHook) {
+    *TICK.lock().expect("poisoned") = Some(hook);
+}
+
+/// Разбудить поток рендера (с любого потока), чтобы он прошёл цикл и вызвал хук.
+pub fn wake() {
+    wake_render_thread();
+}
+
 /// Set by [`start_with_assets`], consumed when the app is built.
 static CONFIGURE: Mutex<Option<Configure>> = Mutex::new(None);
 
@@ -265,6 +280,9 @@ fn render_thread(launch: Launch) {
             }
         }
 
+        if let Some(hook) = TICK.lock().expect("poisoned").as_mut() {
+            hook();
+        }
         platform.tick();
         platform.flush_main_thread_tasks();
         if crate::TEXT_INPUT_DIRTY.load(Ordering::Acquire) {
