@@ -1080,6 +1080,11 @@ impl AndroidWindow {
 
     // ── state queries ─────────────────────────────────────────────────────────
 
+    /// Следующий кадр нарисовать целиком (см. `host::force_frame`).
+    pub fn force_render(&self) {
+        self.force_render_once.store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Whether the window currently has an active wgpu surface.
     pub fn has_surface(&self) -> bool {
         self.state.lock().renderer.is_some()

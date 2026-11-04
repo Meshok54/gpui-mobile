@@ -152,6 +152,14 @@ pub fn wake() {
     wake_render_thread();
 }
 
+/// Нарисовать окно на ближайшем кадре целиком, даже если GPUI не считает его изменившимся (у хоста сменилось то,
+/// чего GPUI не видит, — например кадр камеры в `paint_host_texture`). С любого потока.
+pub fn force_frame() {
+    FORCE.store(true, Ordering::Release);
+    wake_render_thread();
+}
+static FORCE: AtomicBool = AtomicBool::new(false);
+
 /// Set by [`start_with_assets`], consumed when the app is built.
 static CONFIGURE: Mutex<Option<Configure>> = Mutex::new(None);
 
@@ -282,6 +290,12 @@ fn render_thread(launch: Launch) {
 
         if let Some(hook) = TICK.lock().expect("poisoned").as_mut() {
             hook();
+        }
+        if FORCE.swap(false, Ordering::AcqRel) {
+            if let Some(win) = platform.primary_window() {
+                win.force_render();
+            }
+            super::frame_source::schedule_frame();
         }
         platform.tick();
         platform.flush_main_thread_tasks();
